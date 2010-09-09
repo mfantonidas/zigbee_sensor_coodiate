@@ -91,6 +91,19 @@ typedef enum
 	E_STATE_READ_TEMP_HUMID_READY
 }teStateReadTempHumidity;
 
+/*fill state of sensor data*/
+typedef enum
+{
+    E_FILL_COMPLETE,
+    E_FILL_UNCOMPLETE
+}teStateDataFill;
+
+typedef enum
+{
+    IS_NULL,
+    NOT_NULL
+}isAvailable;
+
 /* Temp/Humidity measurement data */
 typedef struct
 {
@@ -98,6 +111,35 @@ typedef struct
 	uint16 					u16HumidReading;
 	teStateReadTempHumidity eState;
 }tsTempHumiditySensor;
+
+typedef struct
+{
+    uint num;
+    bool_t enable;
+    teStateDataFill estate;
+}sensorsState;
+
+typedef struct
+{
+    uint16 tempdata;
+    uint16 humidata;
+    int sensorID;
+    isAvailable available;
+}multiData;
+
+/*typedef struct
+{
+    multiData multidata[6];
+
+};*/
+
+typedef struct
+{
+    uint16 tempdata[6];
+    uint16 humidata[6];
+    int sensorID;
+    sensorsState estate;
+}singleData;
 
 /****************************************************************************/
 /***        Local Function Prototypes                                     ***/
@@ -121,6 +163,12 @@ PRIVATE uint8 u8AppTicks = 0;
 PRIVATE bool_t bNwkStarted = FALSE;
 PRIVATE bool_t bAppTimerStarted = FALSE;
 PRIVATE tsTempHumiditySensor sTempHumiditySensor;
+PRIVATE sensorsState sensorstate[3];
+PRIVATE bool_t armStarted = 0;
+PRIVATE uint8 armCmdRsv;
+PRIVATE singleData singledata;
+PRIVATE multiData multidata[6];
+PRIVATE enum {start = 103, single = 49, mulit = 50, del0 = 51, del1 = 52, del2 = 53, stop = 115}armCmd;
 /****************************************************************************
  *
  * NAME: AppColdStart
@@ -184,7 +232,7 @@ PUBLIC void AppWarmStart(void)
  ****************************************************************************/
 PRIVATE void vInit(void)
 {
-
+    int i;
     /* Initialise Zigbee stack */
     JZS_u32InitSystem(TRUE);
 
@@ -204,7 +252,18 @@ PRIVATE void vInit(void)
 
     /* Set sensors */
     vInitSensors();
-
+    singledata.estate.estate = E_FILL_UNCOMPLETE;
+    for(i = 0; i < 6; i++)
+    {
+        multidata[i].available = NOT_NULL;
+        multidata[i].sensorID = i;
+    }
+    for(i = 0; i < 3; i++)
+    {
+        sensorstate[i].enable = TRUE;
+        sensorstate[i].num = i;
+    }
+    armCmd = single;
     /* Start BOS */
     (void)bBosRun(TRUE);
 
@@ -282,9 +341,12 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
 {
     uint8 u8Msg;
     uint8 u8TimerId;
-    static int count = 1;
+    static int count = 3;
     static bool_t bToggle;
-    uint16 temp;
+    static int fillcount = 0;
+    int i;
+    uint16 ttemp, htemp;
+    //static int sensorID[3] = {0, };
 
     vReadTempHumidity();
 
@@ -300,11 +362,93 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
         }
         bToggle = !bToggle;
 
-        vTxSerialDataFrame(count, sTempHumiditySensor.u16HumidReading,sTempHumiditySensor.u16TempReading);
-        count ++;
-        if(count > 3)
-            count = 1;
-        sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
+        switch(armCmd)
+        {
+            case start:
+                vPrintf("sensors: ");
+                for(i = 0; i < 3; i++)
+                {
+                    if(i == 2)
+                        vPrintf("\n");
+                    vPrintf("%d ", i);
+                }
+                while(armCmd == start);
+                break;
+            case single:
+                singledata.estate.num++;
+                if(singledata.estate.num > 5)
+                {
+                    singledata.estate.num = 0;
+                    singledata.estate.estate = E_FILL_COMPLETE;
+                }else
+                    singledata.estate.estate = E_FILL_UNCOMPLETE;
+                singledata.tempdata[singledata.estate.num] = sTempHumiditySensor.u16TempReading;
+                singledata.humidata[singledata.estate.num] = sTempHumiditySensor.u16HumidReading;
+                if(singledata.tempdata[singledata.estate.num] > 100)
+                {
+                    singledata.tempdata[singledata.estate.num] = 100;
+                    ttemp = 3;
+                }else if(singledata.tempdata[singledata.estate.num] <= 0)
+                {
+                    singledata.tempdata[singledata.estate.num] = 0;
+                    ttemp = 1;
+                }else
+                {
+                    ttemp = 2;
+                }
+
+                if(singledata.humidata[singledata.estate.num] > 100)
+                {
+                    singledata.humidata[singledata.estate.num] = 100;
+                    htemp = 3;
+                }else if(singledata.humidata[singledata.estate.num] <= 0)
+                {
+                    singledata.humidata[singledata.estate.num] = 0;
+                    htemp = 1;
+                }else
+                {
+                    htemp = 2;
+                }
+
+                if(singledata.estate.estate == E_FILL_COMPLETE)
+                    for(i = 0; i < 6; i++)
+                        vPrintf("S%d,T[%d]%d:%d,H%d[%d]:%d\n",
+                                singledata.sensorID, i, ttemp, singledata.tempdata[i], i, htemp, singledata.humidata[i]);
+                    //vTxSerialDataFrame(1, sTempHumiditySensor.u16HumidReading,sTempHumiditySensor.u16TempReading);
+                sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
+                break;
+            case mulit:
+                for(i = 0; i < 6; i++)
+                {
+                    if(multidata[i].available == NOT_NULL)
+                    {
+                        multidata[i].tempdata = sTempHumiditySensor.u16TempReading;
+                        multidata[i].humidata = sTempHumiditySensor.u16HumidReading;
+                        vPrintf("S:%d,T:%d,H:%d\n",
+                                multidata[i].sensorID, multidata[i].tempdata, multidata[i].humidata);
+                    }
+                }
+                sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
+                break;
+            case del0:
+                sensorstate[0].enable = FALSE;
+                armCmd = mulit;
+                break;
+            case del1:
+                sensorstate[1].enable = FALSE;
+                armCmd = mulit;
+                break;
+            case del2:
+                sensorstate[2].enable = FALSE;
+                armCmd = mulit;
+                break;
+            case stop:
+                vPrintf("stopped!\n");
+                break;
+            default:
+                //vPrintf("wait for start!\n");
+                break;
+        }
 	}
     (void)bBosCreateTimer(vToggleLed, &u8Msg, 0, (APP_TICK_PERIOD_ms / 40), &u8TimerId);
 }
@@ -411,6 +555,14 @@ void JZA_vAppEventHandler(void)
  ****************************************************************************/
 PUBLIC void JZA_vPeripheralEvent(uint32 u32Device, uint32 u32ItemBitmap)
 {
+    if(u32Device == E_AHI_DEVICE_UART0)
+    {
+        if((u32ItemBitmap & 0x000000ff) == E_AHI_UART_INT_RXDATA)
+            armCmdRsv = ((u32ItemBitmap & 0x0000ff00) >> 8);
+    }
+    if(armCmdRsv==start||armCmdRsv==single||armCmdRsv==mulit||armCmdRsv==del0||armCmdRsv==del1||armCmdRsv==del2||armCmdRsv==stop)
+        armCmd = armCmdRsv;
+
 }
 
 /****************************************************************************
