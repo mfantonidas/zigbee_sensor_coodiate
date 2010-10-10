@@ -61,6 +61,7 @@
 #include <AppHardwareApi.h>
 #include <Utilities.h>
 #include <JZ_Api.h>
+#include <AppApi.h>
 #include <gdb.h>
 #include "..\..\..\Chip\Common\Include\Printf.h"
 
@@ -124,6 +125,7 @@ typedef struct
     uint16 tempdata;
     uint16 humidata;
     int sensorID;
+    MAC_ExtAddr_s sExtAddr;
     isAvailable available;
 }multiData;
 
@@ -139,6 +141,8 @@ typedef struct
     uint16 humidata[6];
     int sensorID;
     sensorsState estate;
+    uint8 templength[6];
+    uint8 humilength[6];
 }singleData;
 
 /****************************************************************************/
@@ -148,7 +152,9 @@ PRIVATE void vInit(void);
 PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy);
 PRIVATE void vTxSerialDataFrame(uint16 count,
                                 uint16 u16Humidity,
-                                uint16 u16Temperature);
+                                uint16 u16Temperature,
+                                uint32 sensorMach,
+                                uint32 sensorMacl);
 PRIVATE void vInitSensors(void);
 PRIVATE void vReadTempHumidity(void);
 
@@ -168,6 +174,7 @@ PRIVATE bool_t armStarted = 0;
 PRIVATE uint8 armCmdRsv;
 PRIVATE singleData singledata;
 PRIVATE multiData multidata[6];
+PRIVATE MAC_ExtAddr_s sExtAddr;
 PRIVATE enum {start = 103, single = 49, mulit = 50, del0 = 51, del1 = 52, del2 = 53, stop = 115}armCmd;
 /****************************************************************************
  *
@@ -233,6 +240,9 @@ PUBLIC void AppWarmStart(void)
 PRIVATE void vInit(void)
 {
     int i;
+    int machh, machl, maclh, macll;
+    uint8  MacAddress[8];
+    void   *pu8ExtAdr;
     /* Initialise Zigbee stack */
     JZS_u32InitSystem(TRUE);
 
@@ -264,6 +274,24 @@ PRIVATE void vInit(void)
         sensorstate[i].num = i;
     }
     armCmd = single;
+
+    sExtAddr.u32L = *(uint32 *)(0xf0000004);
+
+    sExtAddr.u32H = *(uint32 *)(0xf0000000);
+
+    vPrintf("%x, %x \n", sExtAddr.u32H, sExtAddr.u32L);
+
+
+
+  /* Set pointer to point to location in internal RAM where extended address is stored */
+       pu8ExtAdr = pvAppApiGetMacAddrLocation();
+     /* Load extended address into frame payload */
+       for (i = 0; i < 8; i++)
+        {
+         MacAddress[i] = *( (uint8*)pu8ExtAdr + i);
+         vPrintf(" %x",MacAddress[i] );
+        }
+
     /* Start BOS */
     (void)bBosRun(TRUE);
 
@@ -320,12 +348,15 @@ PRIVATE void vInitSensors(void)
  ****************************************************************************/
 PRIVATE void vTxSerialDataFrame(uint16 count,
                                 uint16 u16Humidity,
-                                uint16 u16Temperature)
+                                uint16 u16Temperature,
+                                uint32 sensorMach,
+                                uint32 sensorMacl)
 {
     #ifndef GDB
         vPrintf("\n\rS%d,", count);
         vPrintf("\n\rH%d,", u16Humidity);
         vPrintf("\n\rT%d,", u16Temperature);
+        vPrintf("\n\rMac:%x %x,", sensorMach, sensorMacl);
 	#endif
 }
 
@@ -345,7 +376,13 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
     static bool_t bToggle;
     static int fillcount = 0;
     int i;
-    uint16 ttemp, htemp;
+    AF_Transaction_s asTransaction[1];
+
+
+    asTransaction[0].u8SequenceNum = u8AfGetTransactionSequence(TRUE);
+    asTransaction[0].uFrame.sMsg.u8TransactionDataLen = 1;
+
+    asTransaction[0].uFrame.sMsg.au8TransactionData[0] = 9;
     //static int sensorID[3] = {0, };
 
     vReadTempHumidity();
@@ -362,6 +399,19 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
         }
         bToggle = !bToggle;
 
+        if(afdeDataRequest(APS_ADDRMODE_SHORT,       /* Address type */
+                          0x0001,                   /* Destination address */
+                          WSN_DATA_SINK_ENDPOINT,   /* destination endpoint */
+                          WSN_DATA_SOURCE_ENDPOINT, /* Source endpoint */
+                          WSN_PROFILE_ID,           /* Profile ID */
+                          WSN_CID_SENSOR_READINGS,  /* Cluster ID */
+                          AF_MSG,                   /* Frame type */
+                          1,                        /* Transactions */
+                          asTransaction,            /* Transaction data */
+                          APS_TXOPTION_NONE,        /* Transmit options */
+                          SUPPRESS_ROUTE_DISCOVERY, /* Route discovery mode */
+                          0)){;}                       /* Radius count */
+        /*armCmd = single;
         switch(armCmd)
         {
             case start:
@@ -387,37 +437,41 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
                 if(singledata.tempdata[singledata.estate.num] > 100)
                 {
                     singledata.tempdata[singledata.estate.num] = 100;
-                    ttemp = 3;
+                    singledata.templength[singledata.estate.num] = 3;
                 }else if(singledata.tempdata[singledata.estate.num] <= 0)
                 {
                     singledata.tempdata[singledata.estate.num] = 0;
-                    ttemp = 1;
+                    singledata.templength[singledata.estate.num] = 1;
                 }else
                 {
-                    ttemp = 2;
+                    singledata.templength[singledata.estate.num] = 2;
                 }
 
                 if(singledata.humidata[singledata.estate.num] > 100)
                 {
                     singledata.humidata[singledata.estate.num] = 100;
-                    htemp = 3;
+                    singledata.humilength[singledata.estate.num] = 3;
                 }else if(singledata.humidata[singledata.estate.num] <= 0)
                 {
                     singledata.humidata[singledata.estate.num] = 0;
-                    htemp = 1;
+                    singledata.humilength[singledata.estate.num] = 1;
                 }else
                 {
-                    htemp = 2;
+                    singledata.humilength[singledata.estate.num] = 2;
                 }
 
                 if(singledata.estate.estate == E_FILL_COMPLETE)
-                    for(i = 0; i < 6; i++)
-                        vPrintf("S%d,T[%d]%d:%d,H%d[%d]:%d\n",
-                                singledata.sensorID, i, ttemp, singledata.tempdata[i], i, htemp, singledata.humidata[i]);
+                    vPrintf("S%d,T[%d]%d:%d,H[%d]%d:%d,T[%d]%d:%d,H[%d]%d:%d,T[%d]%d:%d,H[%d]%d:%d,T[%d]%d:%d,H[%d]%d:%d,T[%d]%d:%d,H[%d]%d:%d,T[%d]%d:%d,H[%d]%d:%d\n",
+                                singledata.sensorID, 0, singledata.templength[0], singledata.tempdata[0], 0, singledata.humilength[0], singledata.humidata[0],
+                                1, singledata.templength[1], singledata.tempdata[1], 1, singledata.humilength[1], singledata.humidata[1],
+                                2, singledata.templength[2], singledata.tempdata[2], 2, singledata.humilength[2], singledata.humidata[2],
+                                3, singledata.templength[3], singledata.tempdata[3], 3, singledata.humilength[3], singledata.humidata[3],
+                                4, singledata.templength[4], singledata.tempdata[4], 4, singledata.humilength[4], singledata.humidata[4],
+                                5, singledata.templength[5], singledata.tempdata[5], 5, singledata.humilength[5], singledata.humidata[5]);
                     //vTxSerialDataFrame(1, sTempHumiditySensor.u16HumidReading,sTempHumiditySensor.u16TempReading);
                 sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
                 break;
-            case mulit:
+            /*case mulit:
                 for(i = 0; i < 6; i++)
                 {
                     if(multidata[i].available == NOT_NULL)
@@ -448,9 +502,9 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
             default:
                 //vPrintf("wait for start!\n");
                 break;
-        }
+        }*/
 	}
-    (void)bBosCreateTimer(vToggleLed, &u8Msg, 0, (APP_TICK_PERIOD_ms / 40), &u8TimerId);
+    (void)bBosCreateTimer(vToggleLed, &u8Msg, 0, (APP_TICK_PERIOD_ms / 50), &u8TimerId);
 }
 
 /****************************************************************************
@@ -562,7 +616,6 @@ PUBLIC void JZA_vPeripheralEvent(uint32 u32Device, uint32 u32ItemBitmap)
     }
     if(armCmdRsv==start||armCmdRsv==single||armCmdRsv==mulit||armCmdRsv==del0||armCmdRsv==del1||armCmdRsv==del2||armCmdRsv==stop)
         armCmd = armCmdRsv;
-
 }
 
 /****************************************************************************
@@ -696,12 +749,16 @@ PUBLIC bool_t JZA_bAfMsgObject(APS_Addrmode_e eAddrMode,
 	uint16 u16Humidity;
 	uint16 u16BattVoltage;
 	uint16 u16Temperature;
-	uint16 count;
+	uint32 mach, macl;
+	static uint16 count;
+	MAC_ExtAddr_s sExtAddr, *psExtAddr;
+	int i;
 
     if ((eAddrMode == APS_ADDRMODE_SHORT) && (u8DstEP == WSN_DATA_SINK_ENDPOINT))
     {
         if(u8ClusterID == WSN_CID_SENSOR_READINGS)
         {
+            count++;
             u16BattVoltage  = puTransactionInd->uFrame.sMsg.au8TransactionData[1];
             u16BattVoltage  = u16BattVoltage << 8;
             u16BattVoltage |= puTransactionInd->uFrame.sMsg.au8TransactionData[0];
@@ -714,7 +771,31 @@ PUBLIC bool_t JZA_bAfMsgObject(APS_Addrmode_e eAddrMode,
             u16Humidity  = u16Humidity << 8;
             u16Humidity |= puTransactionInd->uFrame.sMsg.au8TransactionData[4];
 
-            vTxSerialDataFrame(count, u16Humidity, u16Temperature);
+            for(i = 6; i < 14; i++)
+                vPrintf("%x ", puTransactionInd->uFrame.sMsg.au8TransactionData[i]);
+            mach = (puTransactionInd->uFrame.sMsg.au8TransactionData[6] & 0xff);
+            mach = mach << 24;
+            mach |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[7] << 16) & 0xffff0000);
+            mach |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[8] << 8) & 0xffffff00);
+            mach |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[9]) & 0xffffffff);
+
+            macl = (puTransactionInd->uFrame.sMsg.au8TransactionData[10] & 0xff);
+            macl = macl << 24;
+            macl |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[11] << 16) & 0xffff0000);
+            macl |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[12] << 8) & 0xffffff00);
+            macl |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[13]) & 0xffffffff);
+
+            sExtAddr.u32L = macl;
+            sExtAddr.u32H = mach;
+
+            if(count > 10)
+            {
+                count = 0;
+                JZS_vRemoveNode(&sExtAddr, TRUE);
+                //bNwkRemoveDevice(u16AddrSrc);
+                vPrintf("remove success!\n");
+            }
+            vTxSerialDataFrame(count, u16Humidity, u16Temperature, mach, macl);
         }
     }
     return 0;
@@ -761,8 +842,8 @@ PUBLIC void JZA_vStackEvent(teJZS_EventIdentifier eEventId,
 		// load the simple descriptor now that the network has started
 		uint8 u8InputClusterCnt      = 1;
 		uint8 au8InputClusterList[]  = {WSN_CID_SENSOR_READINGS};
-		uint8 u8OutputClusterCnt     = 0;
-		uint8 au8OutputClusterList[] = {};
+		uint8 u8OutputClusterCnt     = 1;
+		uint8 au8OutputClusterList[] = {WSN_CID_SENSOR_READINGS};
 
 		(void)afmeAddSimpleDesc(WSN_DATA_SINK_ENDPOINT,
 								WSN_PROFILE_ID,
