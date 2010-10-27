@@ -72,7 +72,7 @@
 /***        Macro Definitions                                             ***/
 /****************************************************************************/
 /* Timing values */
-#define APP_TICK_PERIOD_ms			 500
+#define APP_TICK_PERIOD_ms			 1500
 #define APP_TICK_PERIOD     	  (APP_TICK_PERIOD_ms * 6)
 
 #define APP_DATA_SEND_PERIOD_ms	  1000
@@ -101,6 +101,14 @@ typedef enum
 
 typedef enum
 {
+    UNSTARTED,
+    WAITING_MODE,
+    SINGLE_MODE,
+    MULTI_MODE
+}dataType;
+
+typedef enum
+{
     IS_NULL,
     NOT_NULL
 }isAvailable;
@@ -124,9 +132,12 @@ typedef struct
 {
     uint16 tempdata;
     uint16 humidata;
+    bool_t isValiable;
     int sensorID;
     MAC_ExtAddr_s sExtAddr;
     isAvailable available;
+    uint8 templength;
+    uint8 humilength;
 }multiData;
 
 /*typedef struct
@@ -140,10 +151,30 @@ typedef struct
     uint16 tempdata[6];
     uint16 humidata[6];
     int sensorID;
+    bool_t isFilled;
     sensorsState estate;
     uint8 templength[6];
     uint8 humilength[6];
 }singleData;
+
+typedef struct
+{
+    bool_t isValiable;
+    int sensorID;
+    uint32 mach, macl;
+}sensorInfo;
+
+typedef struct
+{
+    int sensorID;
+    sensorInfo sensorinfo[6];
+    dataType datatype;
+    int sensorCount;
+    union {
+        singleData sd;
+        multiData md[6];
+    }data;
+}sensorData;
 
 /****************************************************************************/
 /***        Local Function Prototypes                                     ***/
@@ -175,7 +206,11 @@ PRIVATE uint8 armCmdRsv;
 PRIVATE singleData singledata;
 PRIVATE multiData multidata[6];
 PRIVATE MAC_ExtAddr_s sExtAddr;
-PRIVATE enum {start = 103, single = 49, mulit = 50, del0 = 51, del1 = 52, del2 = 53, stop = 115}armCmd;
+PRIVATE bool_t commandChanged = FALSE;
+PRIVATE dataType runmode = WAITING_MODE;
+PRIVATE sensorData sensordata;
+PRIVATE bool_t getinfo_ok = FALSE;
+PRIVATE enum {start = 103, single = 49, mulit = 50, stop = 115,reflash = 114}armCmd = reflash;
 /****************************************************************************
  *
  * NAME: AppColdStart
@@ -265,32 +300,31 @@ PRIVATE void vInit(void)
     singledata.estate.estate = E_FILL_UNCOMPLETE;
     for(i = 0; i < 6; i++)
     {
-        multidata[i].available = NOT_NULL;
-        multidata[i].sensorID = i;
+        sensordata.data.sd.tempdata[i] = 0;
+        sensordata.data.md[i].tempdata = 0;
+        sensordata.data.sd.humidata[i] = 0;
+        sensordata.data.md[i].humidata = 0;
+        sensordata.sensorinfo[i].sensorID = 0;
+        sensordata.sensorinfo[i].isValiable = FALSE;
+        sensordata.sensorCount = 0;
+        sensordata.datatype = UNSTARTED;
     }
-    for(i = 0; i < 3; i++)
-    {
-        sensorstate[i].enable = TRUE;
-        sensorstate[i].num = i;
-    }
-    armCmd = single;
 
-    sExtAddr.u32L = *(uint32 *)(0xf0000004);
-
-    sExtAddr.u32H = *(uint32 *)(0xf0000000);
-
-    vPrintf("%x, %x \n", sExtAddr.u32H, sExtAddr.u32L);
+    //sExtAddr.u32L = *(uint32 *)(0xf0000004);
+    //sExtAddr.u32H = *(uint32 *)(0xf0000000);
+    //vPrintf("%x, %x \n", sExtAddr.u32H, sExtAddr.u32L);
 
 
 
   /* Set pointer to point to location in internal RAM where extended address is stored */
-       pu8ExtAdr = pvAppApiGetMacAddrLocation();
+      // pu8ExtAdr = pvAppApiGetMacAddrLocation();
      /* Load extended address into frame payload */
-       for (i = 0; i < 8; i++)
-        {
-         MacAddress[i] = *( (uint8*)pu8ExtAdr + i);
-         vPrintf(" %x",MacAddress[i] );
-        }
+      // for (i = 0; i < 8; i++)
+      //  {
+      //   MacAddress[i] = *( (uint8*)pu8ExtAdr + i);
+      //   vPrintf(" %x",MacAddress[i] );
+      //  }
+      //  vPrintf("\n");
 
     /* Start BOS */
     (void)bBosRun(TRUE);
@@ -375,6 +409,8 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
     static int count = 3;
     static bool_t bToggle;
     static int fillcount = 0;
+    MAC_ExtAddr_s sExtAddr, *psExtAddr;
+
     int i;
     AF_Transaction_s asTransaction[1];
 
@@ -387,45 +423,90 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
 
     vReadTempHumidity();
 
-    if (sTempHumiditySensor.eState == E_STATE_READ_TEMP_HUMID_READY)
-	{
-	    if (bToggle)
-        {
-            vLedControl(0,0);
-        }
-        else
-        {
-            vLedControl(0,1);
-        }
-        bToggle = !bToggle;
-
-        if(afdeDataRequest(APS_ADDRMODE_SHORT,       /* Address type */
-                          0x0001,                   /* Destination address */
-                          WSN_DATA_SINK_ENDPOINT,   /* destination endpoint */
-                          WSN_DATA_SOURCE_ENDPOINT, /* Source endpoint */
-                          WSN_PROFILE_ID,           /* Profile ID */
-                          WSN_CID_SENSOR_READINGS,  /* Cluster ID */
-                          AF_MSG,                   /* Frame type */
-                          1,                        /* Transactions */
-                          asTransaction,            /* Transaction data */
-                          APS_TXOPTION_NONE,        /* Transmit options */
-                          SUPPRESS_ROUTE_DISCOVERY, /* Route discovery mode */
-                          0)){;}                       /* Radius count */
-        /*armCmd = single;
+    if (bToggle)
+    {
+        vLedControl(0,0);
+    }
+    else
+    {
+        vLedControl(0,1);
+    }
+    bToggle = !bToggle;
+    /* if(afdeDataRequest(APS_ADDRMODE_SHORT,
+                          0x0001,
+                          WSN_DATA_SOURCE_ENDPOINT,
+                          WSN_DATA_SINK_ENDPOINT,
+                          WSN_PROFILE_ID,
+                          WSN_CID_SENSOR_READINGS,
+                          AF_MSG,
+                          1,
+                          asTransaction,
+                          APS_TXOPTION_NONE,
+                          SUPPRESS_ROUTE_DISCOVERY,
+                          0)){;}
+        armCmd = single;*/
+    if(commandChanged == TRUE)
+    {
+        //vPrintf("command changed!\n");
+        commandChanged = FALSE;
         switch(armCmd)
         {
-            case start:
-                vPrintf("sensors: ");
-                for(i = 0; i < 3; i++)
+            case reflash:
+                //vPrintf("reflashed\n");
+                sensordata.datatype = WAITING_MODE;
+                for(i = 0; i < 6; i++)
                 {
-                    if(i == 2)
-                        vPrintf("\n");
-                    vPrintf("%d ", i);
+                    if(sensordata.sensorinfo[i].isValiable == TRUE)
+                    {
+                        asTransaction[0].uFrame.sMsg.au8TransactionData[0] = WAITING_MODE;
+                        afdeDataRequest(APS_ADDRMODE_SHORT,
+                            sensordata.sensorinfo[i].sensorID,
+                            WSN_DATA_SOURCE_ENDPOINT,
+                            WSN_DATA_SINK_ENDPOINT,
+                            WSN_PROFILE_ID,
+                            WSN_CID_SENSOR_READINGS,
+                            AF_MSG,
+                            1,
+                            asTransaction,
+                            APS_TXOPTION_NONE,
+                            SUPPRESS_ROUTE_DISCOVERY,
+                            0);
+                    }
                 }
-                while(armCmd == start);
                 break;
             case single:
-                singledata.estate.num++;
+                //vPrintf("single mode send\n");
+                sensordata.sensorID = 0x0001;
+                for(i = 0; i < 6; i++)
+                {
+                    if(sensordata.sensorID != sensordata.sensorinfo[i].sensorID)
+                    {
+                        if(sensordata.sensorinfo[i].isValiable == TRUE)
+                        {
+                            sExtAddr.u32L = sensordata.sensorinfo[i].macl;
+                            sExtAddr.u32H = sensordata.sensorinfo[i].mach;
+
+                            JZS_vRemoveNode(&sExtAddr, TRUE);
+                            //bNwkRemoveDevice(u16AddrSrc);
+                            vPrintf("sensor: %d remove success!x\n", sensordata.sensorinfo[i].sensorID);
+                            sensordata.sensorinfo[i].isValiable = FALSE;
+                        }
+                    }
+                }
+                asTransaction[0].uFrame.sMsg.au8TransactionData[0] = CONTROL_CMD_GET_DATA_S;
+                afdeDataRequest(APS_ADDRMODE_SHORT,
+                        sensordata.sensorID,
+                        WSN_DATA_SOURCE_ENDPOINT,
+                        WSN_DATA_SINK_ENDPOINT,
+                        WSN_PROFILE_ID,
+                        WSN_CID_SENSOR_READINGS,
+                        AF_MSG,
+                        1,
+                        asTransaction,
+                        APS_TXOPTION_NONE,
+                        SUPPRESS_ROUTE_DISCOVERY,
+                        0);
+                /*singledata.estate.num++;
                 if(singledata.estate.num > 5)
                 {
                     singledata.estate.num = 0;
@@ -469,42 +550,77 @@ PRIVATE void vToggleLed(void *pvMsg, uint8 u8Dummy)
                                 4, singledata.templength[4], singledata.tempdata[4], 4, singledata.humilength[4], singledata.humidata[4],
                                 5, singledata.templength[5], singledata.tempdata[5], 5, singledata.humilength[5], singledata.humidata[5]);
                     //vTxSerialDataFrame(1, sTempHumiditySensor.u16HumidReading,sTempHumiditySensor.u16TempReading);
-                sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
+                sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;*/
                 break;
-            /*case mulit:
+            case mulit:
                 for(i = 0; i < 6; i++)
                 {
-                    if(multidata[i].available == NOT_NULL)
+                    asTransaction[0].uFrame.sMsg.au8TransactionData[0] = CONTROL_CMD_GET_DATA_M;
+                    if(sensordata.sensorinfo[i].isValiable == TRUE)
+                        afdeDataRequest(APS_ADDRMODE_SHORT,
+                        sensordata.sensorinfo[i].sensorID,
+                        WSN_DATA_SOURCE_ENDPOINT,
+                        WSN_DATA_SINK_ENDPOINT,
+                        WSN_PROFILE_ID,
+                        WSN_CID_SENSOR_READINGS,
+                        AF_MSG,
+                        1,
+                        asTransaction,
+                        APS_TXOPTION_NONE,
+                        SUPPRESS_ROUTE_DISCOVERY,
+                        0);
+                    /*if(multidata[i].available == NOT_NULL)
                     {
                         multidata[i].tempdata = sTempHumiditySensor.u16TempReading;
                         multidata[i].humidata = sTempHumiditySensor.u16HumidReading;
                         vPrintf("S:%d,T:%d,H:%d\n",
                                 multidata[i].sensorID, multidata[i].tempdata, multidata[i].humidata);
-                    }
+                    }*/
                 }
-                sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
-                break;
-            case del0:
-                sensorstate[0].enable = FALSE;
-                armCmd = mulit;
-                break;
-            case del1:
-                sensorstate[1].enable = FALSE;
-                armCmd = mulit;
-                break;
-            case del2:
-                sensorstate[2].enable = FALSE;
-                armCmd = mulit;
+                //sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
                 break;
             case stop:
-                vPrintf("stopped!\n");
+                //vPrintf("stopped!\n");
                 break;
             default:
-                //vPrintf("wait for start!\n");
+                    //vPrintf("wait for start!\n");
                 break;
-        }*/
-	}
-    (void)bBosCreateTimer(vToggleLed, &u8Msg, 0, (APP_TICK_PERIOD_ms / 50), &u8TimerId);
+        }
+    }
+    if(sensordata.datatype == WAITING_MODE)
+    {
+        for(i = 0; i < 6; i++)
+        {
+            if(sensordata.sensorinfo[i].isValiable == TRUE)
+                vPrintf("%d is avaliable x\n", sensordata.sensorinfo[i].sensorID);
+        }
+    }
+    else if(sensordata.datatype == SINGLE_MODE)
+    {
+        if(fillcount == 6)
+            fillcount = 0;
+
+        vPrintf("S%dT%dL%d%dH%dL%d%dx\n", sensordata.data.sd.sensorID,
+                                         fillcount, sensordata.data.sd.templength[fillcount], sensordata.data.sd.tempdata[fillcount],
+                                         fillcount, sensordata.data.sd.humilength[fillcount], sensordata.data.sd.humidata[fillcount]);
+        fillcount++;
+    }
+    else if(sensordata.datatype == MULTI_MODE)
+    {
+        for(i = 0; i < 6; i++)
+        {
+            if(sensordata.data.md[i].isValiable == TRUE)
+                vPrintf("S%dT%dL%d%dH%dL%d%dx\n", sensordata.data.md[i].sensorID,
+                                                 i, sensordata.data.md[i].templength, sensordata.data.md[i].tempdata,
+                                                 i, sensordata.data.md[i].humilength, sensordata.data.md[i].humidata);
+        }
+    }
+    else if(sensordata.datatype == UNSTARTED)
+    {
+        //vPrintf("wait for start\n");
+    }
+
+    (void)bBosCreateTimer(vToggleLed, &u8Msg, 0, (APP_TICK_PERIOD_ms / 10), &u8TimerId);
 }
 
 /****************************************************************************
@@ -614,8 +730,15 @@ PUBLIC void JZA_vPeripheralEvent(uint32 u32Device, uint32 u32ItemBitmap)
         if((u32ItemBitmap & 0x000000ff) == E_AHI_UART_INT_RXDATA)
             armCmdRsv = ((u32ItemBitmap & 0x0000ff00) >> 8);
     }
-    if(armCmdRsv==start||armCmdRsv==single||armCmdRsv==mulit||armCmdRsv==del0||armCmdRsv==del1||armCmdRsv==del2||armCmdRsv==stop)
-        armCmd = armCmdRsv;
+    if(armCmdRsv==start||armCmdRsv==single||armCmdRsv==mulit||armCmdRsv==stop||armCmdRsv==reflash)
+    {
+        if(armCmd != armCmdRsv)
+        {
+            armCmd = armCmdRsv;
+            commandChanged = TRUE;
+            //vPrintf("command changed!\n");
+        }
+    }
 }
 
 /****************************************************************************
@@ -750,40 +873,137 @@ PUBLIC bool_t JZA_bAfMsgObject(APS_Addrmode_e eAddrMode,
 	uint16 u16BattVoltage;
 	uint16 u16Temperature;
 	uint32 mach, macl;
-	static uint16 count;
+	static uint16 count, count1 = 0, count_s = 0;
 	MAC_ExtAddr_s sExtAddr, *psExtAddr;
+	uint16 command;
 	int i;
 
     if ((eAddrMode == APS_ADDRMODE_SHORT) && (u8DstEP == WSN_DATA_SINK_ENDPOINT))
     {
         if(u8ClusterID == WSN_CID_SENSOR_READINGS)
         {
-            count++;
-            u16BattVoltage  = puTransactionInd->uFrame.sMsg.au8TransactionData[1];
+            command = puTransactionInd[0].uFrame.sMsg.au8TransactionData[0];
+            if(command == CONTROL_CMD_GET_INFO)
+            {
+                //vPrintf("CONTROL_CMD_GET_INFO\n");
+                count1++;
+                vPrintf("count1: %dx\n", count1);
+                if(count1 > 10 || getinfo_ok)
+                {
+                    vPrintf("get info okx\n");
+                    getinfo_ok = TRUE;
+                    count1 = 0;
+                    return;
+                }
+                sensordata.datatype = WAITING_MODE;
+                for(i = 0; i < 10; i++)
+                {
+                    if(sensordata.sensorinfo[i].sensorID == u16AddrSrc)
+                        break;
+                    sensordata.sensorinfo[i].sensorID = u16AddrSrc;
+                    sensordata.sensorinfo[i].isValiable = TRUE;
+                    sensordata.sensorinfo[i].mach = (puTransactionInd[0].uFrame.sMsg.au8TransactionData[1] & 0xff);
+                    sensordata.sensorinfo[i].mach = sensordata.sensorinfo[i].mach << 24;
+                    sensordata.sensorinfo[i].mach |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[2] << 16) & 0xffff0000);
+                    sensordata.sensorinfo[i].mach |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[3] << 8) & 0xffffff00);
+                    sensordata.sensorinfo[i].mach |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[4]) & 0xffffffff);
+
+                    sensordata.sensorinfo[i].macl = (puTransactionInd[0].uFrame.sMsg.au8TransactionData[5] & 0xff);
+                    sensordata.sensorinfo[i].macl = sensordata.sensorinfo[i].macl << 24;
+                    sensordata.sensorinfo[i].macl |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[6] << 16) & 0xffff0000);
+                    sensordata.sensorinfo[i].macl |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[7] << 8) & 0xffffff00);
+                    sensordata.sensorinfo[i].macl |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[8]) & 0xffffffff);
+                    break;
+                }
+            }
+            else if(command == CONTROL_CMD_GET_DATA_S)
+            {
+                sensordata.datatype = SINGLE_MODE;
+                //vPrintf("CONTROL_CMD_GET_DATA_S");
+                if(count_s == 6)
+                    count_s = 0;
+                sensordata.datatype = SINGLE_MODE;
+                sensordata.data.sd.sensorID = u16AddrSrc;
+                sensordata.data.sd.tempdata[count_s] = puTransactionInd[0].uFrame.sMsg.au8TransactionData[4];
+                sensordata.data.sd.tempdata[count_s] = sensordata.data.sd.tempdata[count_s]<<8;
+                sensordata.data.sd.tempdata[count_s] |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[3];
+                if(sensordata.data.sd.tempdata[count_s] > 99)
+                    sensordata.data.sd.templength[count_s] = 3;
+                else if(sensordata.data.sd.tempdata[count_s] <10)
+                    sensordata.data.sd.templength[count_s] = 1;
+                else
+                    sensordata.data.sd.templength[count_s] = 2;
+
+                sensordata.data.sd.humidata[count_s] = puTransactionInd[0].uFrame.sMsg.au8TransactionData[6];
+                sensordata.data.sd.humidata[count_s] = sensordata.data.sd.humidata[count_s]<<8;
+                sensordata.data.sd.humidata[count_s] |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[5];
+                if(sensordata.data.sd.humidata[count_s] > 99)
+                    sensordata.data.sd.humilength[count_s] = 3;
+                else if(sensordata.data.sd.humidata[count_s] <10)
+                    sensordata.data.sd.humilength[count_s] = 1;
+                else
+                    sensordata.data.sd.humilength[count_s] = 2;
+
+                count_s++;
+            }
+            else if(command == CONTROL_CMD_GET_DATA_M)
+            {
+                //vPrintf("CONTROL_CMD_GET_DATA_M");
+                sensordata.datatype = MULTI_MODE;
+                for(i = 0; i < 6; i++)
+                {
+                    if(u16AddrSrc == sensordata.sensorinfo[i].sensorID)
+                    {
+                        sensordata.data.md[i].sensorID = u16AddrSrc;
+                        sensordata.data.md[i].isValiable = TRUE;
+                        sensordata.data.md[i].tempdata = puTransactionInd[0].uFrame.sMsg.au8TransactionData[4];
+                        sensordata.data.md[i].tempdata = sensordata.data.md[i].tempdata<<8;
+                        sensordata.data.md[i].tempdata |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[3];
+                        if(sensordata.data.md[i].tempdata > 99)
+                            sensordata.data.md[i].templength = 3;
+                        else if(sensordata.data.md[i].tempdata <10)
+                            sensordata.data.md[i].templength = 1;
+                        else
+                            sensordata.data.md[i].templength = 2;
+
+                        sensordata.data.md[i].humidata = puTransactionInd[0].uFrame.sMsg.au8TransactionData[6];
+                        sensordata.data.md[i].humidata = sensordata.data.md[i].tempdata<<8;
+                        sensordata.data.md[i].humidata |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[5];
+                        if(sensordata.data.md[i].humidata > 99)
+                            sensordata.data.md[i].humilength = 3;
+                        else if(sensordata.data.md[i].humidata <10)
+                            sensordata.data.md[i].humilength = 1;
+                        else
+                            sensordata.data.md[i].humilength = 2;
+                    }
+                }
+            }
+            /*count++;
+            u16BattVoltage  = puTransactionInd[0].uFrame.sMsg.au8TransactionData[2];
             u16BattVoltage  = u16BattVoltage << 8;
-            u16BattVoltage |= puTransactionInd->uFrame.sMsg.au8TransactionData[0];
+            u16BattVoltage |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[1];
 
-            u16Temperature  = puTransactionInd->uFrame.sMsg.au8TransactionData[3];
+            u16Temperature  = puTransactionInd[0].uFrame.sMsg.au8TransactionData[4];
             u16Temperature  = u16Temperature << 8;
-            u16Temperature |= puTransactionInd->uFrame.sMsg.au8TransactionData[2];
+            u16Temperature |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[3];
 
-            u16Humidity  = puTransactionInd->uFrame.sMsg.au8TransactionData[5];
+            u16Humidity  = puTransactionInd[0].uFrame.sMsg.au8TransactionData[6];
             u16Humidity  = u16Humidity << 8;
-            u16Humidity |= puTransactionInd->uFrame.sMsg.au8TransactionData[4];
+            u16Humidity |= puTransactionInd[0].uFrame.sMsg.au8TransactionData[5];
 
             for(i = 6; i < 14; i++)
-                vPrintf("%x ", puTransactionInd->uFrame.sMsg.au8TransactionData[i]);
-            mach = (puTransactionInd->uFrame.sMsg.au8TransactionData[6] & 0xff);
+                vPrintf("%x ", puTransactionInd[0].uFrame.sMsg.au8TransactionData[i]);
+            mach = (puTransactionInd[0].uFrame.sMsg.au8TransactionData[7] & 0xff);
             mach = mach << 24;
-            mach |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[7] << 16) & 0xffff0000);
-            mach |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[8] << 8) & 0xffffff00);
-            mach |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[9]) & 0xffffffff);
+            mach |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[8] << 16) & 0xffff0000);
+            mach |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[9] << 8) & 0xffffff00);
+            mach |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[10]) & 0xffffffff);
 
-            macl = (puTransactionInd->uFrame.sMsg.au8TransactionData[10] & 0xff);
+            macl = (puTransactionInd[0].uFrame.sMsg.au8TransactionData[11] & 0xff);
             macl = macl << 24;
-            macl |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[11] << 16) & 0xffff0000);
-            macl |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[12] << 8) & 0xffffff00);
-            macl |= ((puTransactionInd->uFrame.sMsg.au8TransactionData[13]) & 0xffffffff);
+            macl |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[12] << 16) & 0xffff0000);
+            macl |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[13] << 8) & 0xffffff00);
+            macl |= ((puTransactionInd[0].uFrame.sMsg.au8TransactionData[14]) & 0xffffffff);
 
             sExtAddr.u32L = macl;
             sExtAddr.u32H = mach;
@@ -795,7 +1015,9 @@ PUBLIC bool_t JZA_bAfMsgObject(APS_Addrmode_e eAddrMode,
                 //bNwkRemoveDevice(u16AddrSrc);
                 vPrintf("remove success!\n");
             }
-            vTxSerialDataFrame(count, u16Humidity, u16Temperature, mach, macl);
+            vPrintf("%d\n", puTransactionInd[0].uFrame.sMsg.au8TransactionData[0]);//
+            vPrintf("%d\n", puTransactionInd[1].uFrame.sMsg.au8TransactionData[0]);
+            vTxSerialDataFrame(count, u16Humidity, u16Temperature, mach, macl);*/
         }
     }
     return 0;

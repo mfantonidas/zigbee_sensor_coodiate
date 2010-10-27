@@ -70,7 +70,7 @@
 /***        Macro Definitions                                             ***/
 /****************************************************************************/
 /* Timing values */
-#define APP_TICK_PERIOD_ms		  100
+#define APP_TICK_PERIOD_ms		  600
 #define APP_TICK_PERIOD     	  (APP_TICK_PERIOD_ms * 32)
 
 #define APP_DATA_SEND_PERIOD_ms	  1000
@@ -103,7 +103,19 @@ typedef enum
 	E_STATE_READ_TEMP_HUMID_READY
 }teStateReadTempHumidity;
 
-typedef enum{unrecv = 10, recv = 20}ele;
+typedef enum
+{
+    multicatch = 10,
+    singlecatch = 20
+}idleCoefficient;
+
+typedef enum
+{
+    UNSTARTED,
+    WAITING_MODE,
+    SINGLE_MODE,
+    MULTI_MODE
+}dataType;
 
 /* Battery measurement data */
 typedef struct
@@ -131,6 +143,7 @@ typedef struct
 /****************************************************************************/
 PRIVATE void vInit(void);
 PRIVATE void vSendData(void);
+PRIVATE void vSendState(void);
 PRIVATE void vInitSensors(void);
 PRIVATE void vReadTempHumidity(void);
 PRIVATE void vReadBatteryVoltage(void);
@@ -146,7 +159,9 @@ PRIVATE tsSensorMac sSensorMac;
 PRIVATE bool_t bAppTimerStarted = FALSE;
 PRIVATE bool_t bNwkJoined = FALSE;
 PRIVATE bool_t isStarted = TRUE;
-PRIVATE ele ELE = unrecv;
+PRIVATE idleCoefficient coefficient = multicatch;
+PRIVATE int tempdt;
+PRIVATE dataType datatype;
 /****************************************************************************
  *
  * NAME: AppColdStart
@@ -221,7 +236,7 @@ PRIVATE void vInit(void)
 
     /* Set sensors */
     vInitSensors();
-
+    datatype = WAITING_MODE;
     /* Start BOS */
     (void)bBosRun(TRUE);
 
@@ -305,13 +320,16 @@ PRIVATE void vAppTick(void *pvMsg, uint8 u8Param)
 		    u8AppTicks = 0;
 
             /* Transmit data to coordinator */
-		    vSendData();
+		    if(datatype == WAITING_MODE)
+                vSendState();
+            else if(datatype == SINGLE_MODE || datatype == MULTI_MODE)
+                vSendData();
 
            	sBattSensor.eState = E_STATE_READ_BATT_VOLT_IDLE;
             sTempHumiditySensor.eState = E_STATE_READ_TEMP_HUMID_IDLE;
 		}
 	}
-    (void)bBosCreateTimer(vAppTick, &u8Msg, 0, (APP_TICK_PERIOD_ms / ELE), &u8TimerId);
+    (void)bBosCreateTimer(vAppTick, &u8Msg, 0, (APP_TICK_PERIOD_ms / coefficient), &u8TimerId);
 }
 
 /****************************************************************************
@@ -437,32 +455,33 @@ PRIVATE void vSendData(void)
 
 
     asTransaction[0].u8SequenceNum = u8AfGetTransactionSequence(TRUE);
-    asTransaction[0].uFrame.sMsg.u8TransactionDataLen = 15;
+    asTransaction[0].uFrame.sMsg.u8TransactionDataLen = 16;
 
-    asTransaction[0].uFrame.sMsg.au8TransactionData[0] = sBattSensor.u16Reading;
-	asTransaction[0].uFrame.sMsg.au8TransactionData[1] = sBattSensor.u16Reading >> 8;
-    asTransaction[0].uFrame.sMsg.au8TransactionData[2] = sTempHumiditySensor.u16TempReading;
-	asTransaction[0].uFrame.sMsg.au8TransactionData[3] = sTempHumiditySensor.u16TempReading >> 8;
-    asTransaction[0].uFrame.sMsg.au8TransactionData[4] = sTempHumiditySensor.u16HumidReading;
-	asTransaction[0].uFrame.sMsg.au8TransactionData[5] = sTempHumiditySensor.u16HumidReading >> 8;
+    asTransaction[0].uFrame.sMsg.au8TransactionData[0] = datatype;
+    asTransaction[0].uFrame.sMsg.au8TransactionData[1] = sBattSensor.u16Reading;
+	asTransaction[0].uFrame.sMsg.au8TransactionData[2] = sBattSensor.u16Reading >> 8;
+    asTransaction[0].uFrame.sMsg.au8TransactionData[3] = sTempHumiditySensor.u16TempReading;
+	asTransaction[0].uFrame.sMsg.au8TransactionData[4] = sTempHumiditySensor.u16TempReading >> 8;
+    asTransaction[0].uFrame.sMsg.au8TransactionData[5] = sTempHumiditySensor.u16HumidReading;
+	asTransaction[0].uFrame.sMsg.au8TransactionData[6] = sTempHumiditySensor.u16HumidReading >> 8;
 	pu8ExtAdr = pvAppApiGetMacAddrLocation();
      /* Load extended address into frame payload */
     for (i = 0; i < 8; i++)
     {
         MacAddress[i] = *( (uint8*)pu8ExtAdr + i);
     }
-	asTransaction[0].uFrame.sMsg.au8TransactionData[6] = MacAddress[0];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[7] = MacAddress[1];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[8] = MacAddress[2];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[9] = MacAddress[3];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[10] = MacAddress[4];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[11] = MacAddress[5];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[12] = MacAddress[6];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[13] = MacAddress[7];
-	asTransaction[0].uFrame.sMsg.au8TransactionData[14] = sSensorMac.sensorID;
+	asTransaction[0].uFrame.sMsg.au8TransactionData[7] = MacAddress[0];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[8] = MacAddress[1];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[9] = MacAddress[2];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[10] = MacAddress[3];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[11] = MacAddress[4];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[12] = MacAddress[5];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[13] = MacAddress[6];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[14] = MacAddress[7];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[15] = sSensorMac.sensorID;
 
-    if(isStarted)
-    {
+    //if(isStarted)
+    //{
         (void)afdeDataRequest(APS_ADDRMODE_SHORT,       /* Address type */
                           0x0000,                   /* Destination address */
                           WSN_DATA_SINK_ENDPOINT,   /* destination endpoint */
@@ -475,9 +494,46 @@ PRIVATE void vSendData(void)
                           APS_TXOPTION_NONE,        /* Transmit options */
                           SUPPRESS_ROUTE_DISCOVERY, /* Route discovery mode */
                           0);                       /* Radius count */
-    }
+    //}
 }
 
+PRIVATE void vSendState(void)
+{
+    int i;
+    uint8  MacAddress[8];
+    void   *pu8ExtAdr;
+    AF_Transaction_s asTransaction[1];
+
+    asTransaction[0].u8SequenceNum = u8AfGetTransactionSequence(TRUE);
+    asTransaction[0].uFrame.sMsg.u8TransactionDataLen = 16;
+    pu8ExtAdr = pvAppApiGetMacAddrLocation();
+    for (i = 0; i < 8; i++)
+    {
+        MacAddress[i] = *( (uint8*)pu8ExtAdr + i);
+    }
+    asTransaction[0].uFrame.sMsg.au8TransactionData[0] = CONTROL_CMD_GET_INFO;
+	asTransaction[0].uFrame.sMsg.au8TransactionData[1] = MacAddress[0];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[2] = MacAddress[1];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[3] = MacAddress[2];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[4] = MacAddress[3];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[5] = MacAddress[4];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[6] = MacAddress[5];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[7] = MacAddress[6];
+	asTransaction[0].uFrame.sMsg.au8TransactionData[8] = MacAddress[7];
+
+    (void)afdeDataRequest(APS_ADDRMODE_SHORT,       /* Address type */
+                          0x0000,                   /* Destination address */
+                          WSN_DATA_SINK_ENDPOINT,   /* destination endpoint */
+                          WSN_DATA_SOURCE_ENDPOINT, /* Source endpoint */
+                          WSN_PROFILE_ID,           /* Profile ID */
+                          WSN_CID_SENSOR_READINGS,  /* Cluster ID */
+                          AF_MSG,                   /* Frame type */
+                          1,                        /* Transactions */
+                          asTransaction,            /* Transaction data */
+                          APS_TXOPTION_NONE,        /* Transmit options */
+                          SUPPRESS_ROUTE_DISCOVERY, /* Route discovery mode */
+                          0);                       /* Radius count */
+}
 /****************************************************************************/
 /***               Functions called by the stack                          ***/
 /****************************************************************************/
@@ -533,14 +589,31 @@ PUBLIC bool_t JZA_bAfMsgObject(APS_Addrmode_e eAddrMode,
                                AF_Transaction_s *puTransactionInd,
                                AF_Transaction_s *puTransactionRsp)
 {
+    uint8 data;
     if ((eAddrMode == APS_ADDRMODE_SHORT) && (u8DstEP == WSN_DATA_SOURCE_ENDPOINT))
     {
 
         if(u8ClusterID == WSN_CID_SENSOR_READINGS)
         {
-            ELE = recv;
-            sTempHumiditySensor.u16TempReading = puTransactionInd->uFrame.sMsg.au8TransactionData[0];
-
+            data = puTransactionInd->uFrame.sMsg.au8TransactionData[0];
+            tempdt = puTransactionInd->uFrame.sMsg.au8TransactionData[0];
+            if(data == CONTROL_CMD_GET_INFO)
+            {
+                datatype = WAITING_MODE;
+                coefficient = multicatch;
+            }
+            else if(data == CONTROL_CMD_GET_DATA_S)
+            {
+                datatype = SINGLE_MODE;
+                coefficient = singlecatch;
+            }
+            else if(data == CONTROL_CMD_GET_DATA_M)
+            {
+                datatype = MULTI_MODE;
+                coefficient = multicatch;
+            }
+            else
+                return;
         }
     }
     return 0;
@@ -703,6 +776,21 @@ PUBLIC void JZA_vStackEvent(teJZS_EventIdentifier eEventId,
 {
     if (eEventId == JZS_EVENT_NWK_JOINED_AS_ROUTER)
     {
+        uint8 u8InputClusterCnt      = 1;
+		uint8 au8InputClusterList[]  = {WSN_CID_SENSOR_READINGS};
+		uint8 u8OutputClusterCnt     = 1;
+		uint8 au8OutputClusterList[] = {WSN_CID_SENSOR_READINGS};
+
+		(void)afmeAddSimpleDesc(WSN_DATA_SOURCE_ENDPOINT,
+								WSN_PROFILE_ID,
+								0x0000,
+								0x00,
+								0x00,
+								u8InputClusterCnt,
+								au8InputClusterList,
+								u8OutputClusterCnt,
+								au8OutputClusterList);
+
         bNwkJoined = TRUE;
     }
 }

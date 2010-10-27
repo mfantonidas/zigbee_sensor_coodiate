@@ -65,6 +65,9 @@ extern "C" {
 #define WSN_CHANNEL				    17
 #define WSN_DATA_SINK_ENDPOINT      0x40
 #define WSN_DATA_SOURCE_ENDPOINT    0x41
+#define CONTROL_CMD_GET_INFO        1
+#define CONTROL_CMD_GET_DATA_S      2
+#define CONTROL_CMD_GET_DATA_M      3
 
 /****************************************************************************/
 /***        Type Definitions                                              ***/
